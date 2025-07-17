@@ -196,7 +196,6 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             # Log every batch to W&B
             wandb.log({
                 "batch_train_loss": loss.item(),
-                "global_step": epoch * len(train_loader) + i
             })
             
             # Print progress every 200 batches
@@ -211,28 +210,29 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         val_losses.append(val_metrics['loss'])
         val_accuracies.append(val_metrics['accuracy'])
         
-        # Log epoch metrics to W&B
+        # Calculate combined F1 score (average of macro and weighted)
+        combined_f1 = (val_metrics['f1_macro'] + val_metrics['f1_weighted']) / 2
+        
+        # Log epoch metrics to W&B (6 metrics only)
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
             "val_loss": val_metrics['loss'],
             "val_accuracy": val_metrics['accuracy'],
-            "val_f1_macro": val_metrics['f1_macro'],
-            "val_f1_weighted": val_metrics['f1_weighted'],
-            "global_step": (epoch + 1) * len(train_loader)
+            "val_f1_combined": combined_f1,
+            "learning_rate": optimizer.param_groups[0]['lr']
         })
         
         print(f'Epoch {epoch + 1}/{num_epochs} - Train Loss: {avg_train_loss:.4f}, '
               f'Val Loss: {val_metrics["loss"]:.4f}, Val Acc: {val_metrics["accuracy"]:.2f}%, '
-              f'Val F1: {val_metrics["f1_macro"]:.4f}')
+              f'Combined F1: {combined_f1:.4f}')
         
         # Early stopping check
         if early_stopping and early_stopping(val_metrics['accuracy'], model):
             print(f'Early stopping triggered at epoch {epoch + 1}')
             wandb.log({
                 "early_stopping_epoch": epoch + 1, 
-                "early_stopping_triggered": True,
-                "global_step": (epoch + 1) * len(train_loader)
+                "early_stopping_triggered": True
             })
             break
     
@@ -297,11 +297,13 @@ print(f"Accuracy: {test_results['accuracy']:.2f}%")
 print(f"F1 Score (Macro): {test_results['f1_macro']:.4f}")
 print(f"F1 Score (Weighted): {test_results['f1_weighted']:.4f}")
 
-# Log test metrics and confusion matrix
+# Calculate combined F1 for test results
+test_combined_f1 = (test_results['f1_macro'] + test_results['f1_weighted']) / 2
+
+# Log test metrics (simplified)
 wandb.log({
     "test_accuracy": test_results['accuracy'],
-    "test_f1_macro": test_results['f1_macro'],
-    "test_f1_weighted": test_results['f1_weighted'],
+    "test_f1_combined": test_combined_f1,
     "confusion_matrix": wandb.plot.confusion_matrix(
         probs=None,
         y_true=test_results['labels'],
@@ -323,8 +325,7 @@ wandb.save(model_path)
 # Log final metrics summary
 wandb.summary.update({
     "final_test_accuracy": test_results['accuracy'],
-    "final_test_f1_macro": test_results['f1_macro'],
-    "final_test_f1_weighted": test_results['f1_weighted'],
+    "final_test_f1_combined": test_combined_f1,
     "total_parameters": sum(p.numel() for p in model.parameters()),
     "epochs_trained": len(train_losses),
     "early_stopping_enabled": config["early_stopping_enabled"],
