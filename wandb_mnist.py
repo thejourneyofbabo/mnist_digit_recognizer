@@ -15,15 +15,18 @@ config = {
     "epochs": 40,
     "batch_size": 64,
     "val_split": 0.2,
-    "architecture": "SimpleCNN"
+    "architecture": "SimpleCNN_1x1",
+    "early_stopping_enabled": True,
+    "early_stopping_patience": 7,
+    "early_stopping_min_delta": 0.001
 }
 
 # Initialize W&B
 wandb.init(
     project="mnist-cnn", 
-    name="mnist-cnn-core",
+    name="mnist-cnn-optimized",
     group="1x1-fc", 
-    tags=["mnist-cnn", "core"],
+    tags=["mnist-cnn", "optimized"],
     config=config)
 
 # Check device availability
@@ -31,22 +34,21 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 wandb.config.update({"device": str(device)})
 
-# Data preprocessing
+# Data preprocessing and loading
 transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,))
 ])
 
-# Load datasets
+# Load and split datasets
 full_train_dataset = datasets.MNIST(root="data", train=True, download=True, transform=transform)
 test_dataset = datasets.MNIST(root="data", train=False, download=True, transform=transform)
 
-# Split training data
 val_size = int(len(full_train_dataset) * config["val_split"])
 train_size = len(full_train_dataset) - val_size
 train_dataset, val_dataset = random_split(full_train_dataset, [train_size, val_size])
 
-print(f'Train Size: {len(train_dataset)}, Val Size: {len(val_dataset)}, Test Size: {len(test_dataset)}')
+print(f'Dataset sizes - Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}')
 
 # Create data loaders
 train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True)
@@ -125,20 +127,56 @@ class SimpleCNN_1x1(nn.Module):
 
 # Model setup
 model = SimpleCNN_1x1().to(device)
-# Initialize model, loss, and optimizer
-# model = SimpleCNN().to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
 
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
+# Early Stopping class
+class EarlyStopping:
+    def __init__(self, patience=7, min_delta=0.001, restore_best_weights=True):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.restore_best_weights = restore_best_weights
+        self.best_score = None
+        self.counter = 0
+        self.best_weights = None
+        
+    def __call__(self, val_score, model):
+        if self.best_score is None:
+            self.best_score = val_score
+            self.save_checkpoint(model)
+        elif val_score < self.best_score + self.min_delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                if self.restore_best_weights:
+                    model.load_state_dict(self.best_weights)
+                return True
+        else:
+            self.best_score = val_score
+            self.save_checkpoint(model)
+            self.counter = 0
+        return False
+    
+    def save_checkpoint(self, model):
+        self.best_weights = model.state_dict().copy()
+
 # Training function
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=5):
-    wandb.watch(model, criterion, log="all", log_freq=10)
+    wandb.watch(model, criterion, log="gradients", log_freq=100)
     
-    train_losses = []
-    val_losses = []
-    val_accuracies = []
+    # Initialize early stopping conditionally
+    early_stopping = None
+    if config["early_stopping_enabled"]:
+        early_stopping = EarlyStopping(
+            patience=config["early_stopping_patience"], 
+            min_delta=config["early_stopping_min_delta"]
+        )
+        print(f"Early stopping enabled (patience={config['early_stopping_patience']})")
+    else:
+        print("Early stopping disabled")
+    
+    train_losses, val_losses, val_accuracies = [], [], []
     
     for epoch in range(num_epochs):
         # Training phase
@@ -153,126 +191,145 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            
             epoch_loss += loss.item()
             
-            # Log every batch
+            # Log every batch to W&B
             wandb.log({
                 "batch_train_loss": loss.item(),
                 "global_step": epoch * len(train_loader) + i
             })
             
-            # Print progress every 100 batches
-            if i % 100 == 99:
+            # Print progress every 200 batches
+            if i % 200 == 199:
                 print(f'  [Epoch {epoch + 1}, Batch {i + 1:4d}/{len(train_loader)}] Loss: {loss.item():.4f}')
         
         avg_train_loss = epoch_loss / len(train_loader)
         train_losses.append(avg_train_loss)
         
         # Validation phase
-        model.eval()
-        val_loss = 0.0
-        correct = 0
-        total = 0
+        val_metrics = evaluate_epoch(model, val_loader, criterion, device)
+        val_losses.append(val_metrics['loss'])
+        val_accuracies.append(val_metrics['accuracy'])
         
-        with torch.no_grad():
-            for inputs, labels in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                val_loss += loss.item()
-                
-                _, predicted = torch.max(outputs, 1)
-                total += labels.size(0)
-                correct += (predicted == labels).sum().item()
-        
-        avg_val_loss = val_loss / len(val_loader)
-        val_accuracy = 100 * correct / total
-        val_losses.append(avg_val_loss)
-        val_accuracies.append(val_accuracy)
-        
-        # Log epoch metrics to W&B with global_step
-        current_step = (epoch + 1) * len(train_loader)
+        # Log epoch metrics to W&B
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
-            "val_loss": avg_val_loss,
-            "val_accuracy": val_accuracy,
-            "global_step": current_step
+            "val_loss": val_metrics['loss'],
+            "val_accuracy": val_metrics['accuracy'],
+            "val_f1_macro": val_metrics['f1_macro'],
+            "val_f1_weighted": val_metrics['f1_weighted'],
+            "global_step": (epoch + 1) * len(train_loader)
         })
         
-        print(f'Epoch {epoch + 1}/{num_epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.2f}%')
+        print(f'Epoch {epoch + 1}/{num_epochs} - Train Loss: {avg_train_loss:.4f}, '
+              f'Val Loss: {val_metrics["loss"]:.4f}, Val Acc: {val_metrics["accuracy"]:.2f}%, '
+              f'Val F1: {val_metrics["f1_macro"]:.4f}')
+        
+        # Early stopping check
+        if early_stopping and early_stopping(val_metrics['accuracy'], model):
+            print(f'Early stopping triggered at epoch {epoch + 1}')
+            wandb.log({
+                "early_stopping_epoch": epoch + 1, 
+                "early_stopping_triggered": True,
+                "global_step": (epoch + 1) * len(train_loader)
+            })
+            break
+    
+    # Log final training info
+    wandb.log({
+        "total_epochs_trained": len(train_losses),
+        "early_stopping_enabled": config["early_stopping_enabled"],
+        **({"best_val_accuracy": early_stopping.best_score} if early_stopping else {})
+    })
     
     return train_losses, val_losses, val_accuracies
 
-# Evaluation function
-def evaluate_model(model, test_loader):
+# Helper function for validation evaluation
+def evaluate_epoch(model, data_loader, criterion, device):
     model.eval()
-    all_preds = []
-    all_labels = []
+    total_loss, correct, total = 0.0, 0, 0
+    all_preds, all_labels = [], []
     
     with torch.no_grad():
-        for inputs, labels in test_loader:
+        for inputs, labels in data_loader:
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            total_loss += loss.item()
+            
             _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
             
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
     
-    return np.array(all_preds), np.array(all_labels)
+    accuracy = 100 * correct / total
+    f1_macro = f1_score(all_labels, all_preds, average='macro')
+    f1_weighted = f1_score(all_labels, all_preds, average='weighted')
+    
+    return {
+        'loss': total_loss / len(data_loader),
+        'accuracy': accuracy,
+        'f1_macro': f1_macro,
+        'f1_weighted': f1_weighted,
+        'predictions': all_preds,
+        'labels': all_labels
+    }
+
+# Evaluation function
+def evaluate_model(model, test_loader):
+    return evaluate_epoch(model, test_loader, nn.CrossEntropyLoss(), device)
 
 # Train the model
 print("\nStarting training...")
-train_losses, val_losses, val_accuracies = train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=config["epochs"])
+train_losses, val_losses, val_accuracies = train_model(
+    model, train_loader, val_loader, criterion, optimizer, num_epochs=config["epochs"]
+)
 
 # Evaluate the model
 print("\nEvaluating model...")
-predictions, true_labels = evaluate_model(model, test_loader)
+test_results = evaluate_model(model, test_loader)
 
-# Calculate metrics
-accuracy = accuracy_score(true_labels, predictions)
-f1_macro = f1_score(true_labels, predictions, average='macro')
-f1_weighted = f1_score(true_labels, predictions, average='weighted')
-conf_matrix = confusion_matrix(true_labels, predictions)
+print(f"\nTest Results:")
+print(f"Accuracy: {test_results['accuracy']:.2f}%")
+print(f"F1 Score (Macro): {test_results['f1_macro']:.4f}")
+print(f"F1 Score (Weighted): {test_results['f1_weighted']:.4f}")
 
-print(f"\nTest Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
-print(f"F1 Score (Macro): {f1_macro:.4f}")
-print(f"F1 Score (Weighted): {f1_weighted:.4f}")
-
-# Log test metrics to W&B
+# Log test metrics and confusion matrix
 wandb.log({
-    "test_accuracy": accuracy * 100,
-    "test_f1_macro": f1_macro,
-    "test_f1_weighted": f1_weighted
+    "test_accuracy": test_results['accuracy'],
+    "test_f1_macro": test_results['f1_macro'],
+    "test_f1_weighted": test_results['f1_weighted'],
+    "confusion_matrix": wandb.plot.confusion_matrix(
+        probs=None,
+        y_true=test_results['labels'],
+        preds=test_results['predictions'],
+        class_names=[str(i) for i in range(10)]
+    )
 })
 
-# Log confusion matrix to W&B
-wandb.log({"confusion_matrix": wandb.plot.confusion_matrix(
-    probs=None,
-    y_true=true_labels,
-    preds=predictions,
-    class_names=[str(i) for i in range(10)])
-})
-
-# Classification report
+# Print classification report
 print("\nClassification Report:")
-print(classification_report(true_labels, predictions))
+print(classification_report(test_results['labels'], test_results['predictions']))
 
 # Save model
-torch.save(model.state_dict(), 'mnist_cnn_model.pth')
-print("\nModel saved as 'mnist_cnn_model.pth'")
-
-# Save model to W&B
-wandb.save('mnist_cnn_model.pth')
+model_path = 'mnist_cnn_model.pth'
+torch.save(model.state_dict(), model_path)
+print(f"\nModel saved as '{model_path}'")
+wandb.save(model_path)
 
 # Log final metrics summary
-wandb.summary["final_test_accuracy"] = accuracy * 100
-wandb.summary["final_test_f1_macro"] = f1_macro
-wandb.summary["final_test_f1_weighted"] = f1_weighted
-wandb.summary["total_parameters"] = sum(p.numel() for p in model.parameters())
-wandb.summary["final_train_loss"] = train_losses[-1]
-wandb.summary["final_val_loss"] = val_losses[-1]
+wandb.summary.update({
+    "final_test_accuracy": test_results['accuracy'],
+    "final_test_f1_macro": test_results['f1_macro'],
+    "final_test_f1_weighted": test_results['f1_weighted'],
+    "total_parameters": sum(p.numel() for p in model.parameters()),
+    "epochs_trained": len(train_losses),
+    "early_stopping_enabled": config["early_stopping_enabled"],
+    **({"early_stopping_patience": config["early_stopping_patience"]} if config["early_stopping_enabled"] else {})
+})
 
-# Finish W&B run
 wandb.finish()
+print("Training completed!")
