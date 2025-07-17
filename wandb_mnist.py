@@ -18,7 +18,13 @@ config = {
     "architecture": "SimpleCNN_1x1",
     "early_stopping_enabled": True,
     "early_stopping_patience": 7,
-    "early_stopping_min_delta": 0.001
+    "early_stopping_min_delta": 0.001,
+    "scheduler_enabled": True,
+    "scheduler_type": "StepLR",  # "StepLR", "ReduceLROnPlateau", "CosineAnnealingLR"
+    "scheduler_step_size": 10,   # for StepLR
+    "scheduler_gamma": 0.5,      # for StepLR
+    "scheduler_patience": 3,     # for ReduceLROnPlateau
+    "scheduler_factor": 0.5      # for ReduceLROnPlateau
 }
 
 # Initialize W&B
@@ -130,6 +136,34 @@ model = SimpleCNN_1x1().to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
 
+# Setup learning rate scheduler
+scheduler = None
+if config["scheduler_enabled"]:
+    if config["scheduler_type"] == "StepLR":
+        scheduler = optim.lr_scheduler.StepLR(
+            optimizer, 
+            step_size=config["scheduler_step_size"], 
+            gamma=config["scheduler_gamma"]
+        )
+        print(f"Using StepLR scheduler (step_size={config['scheduler_step_size']}, gamma={config['scheduler_gamma']})")
+    elif config["scheduler_type"] == "ReduceLROnPlateau":
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, 
+            mode='min', 
+            patience=config["scheduler_patience"], 
+            factor=config["scheduler_factor"],
+            verbose=True
+        )
+        print(f"Using ReduceLROnPlateau scheduler (patience={config['scheduler_patience']}, factor={config['scheduler_factor']})")
+    elif config["scheduler_type"] == "CosineAnnealingLR":
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, 
+            T_max=config["epochs"]
+        )
+        print("Using CosineAnnealingLR scheduler")
+else:
+    print("No learning rate scheduler")
+
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
 # Early Stopping class
@@ -162,7 +196,7 @@ class EarlyStopping:
         self.best_weights = model.state_dict().copy()
 
 # Training function
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=5):
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler=None, num_epochs=5):
     wandb.watch(model, criterion, log="gradients", log_freq=100)
     
     # Initialize early stopping conditionally
@@ -213,35 +247,34 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         # Calculate combined F1 score (average of macro and weighted)
         combined_f1 = (val_metrics['f1_macro'] + val_metrics['f1_weighted']) / 2
         
-        # Log epoch metrics to W&B (6 metrics only)
+        # Get current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # Log epoch metrics to W&B (6 metrics with lr)
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
             "val_loss": val_metrics['loss'],
             "val_accuracy": val_metrics['accuracy'],
             "val_f1_combined": combined_f1,
-            "learning_rate": optimizer.param_groups[0]['lr']
+            "learning_rate": current_lr
         })
         
         print(f'Epoch {epoch + 1}/{num_epochs} - Train Loss: {avg_train_loss:.4f}, '
               f'Val Loss: {val_metrics["loss"]:.4f}, Val Acc: {val_metrics["accuracy"]:.2f}%, '
-              f'Combined F1: {combined_f1:.4f}')
+              f'Combined F1: {combined_f1:.4f}, LR: {current_lr:.6f}')
+        
+        # Update learning rate scheduler
+        if scheduler is not None:
+            if config["scheduler_type"] == "ReduceLROnPlateau":
+                scheduler.step(val_metrics['loss'])  # Use validation loss for plateau detection
+            else:
+                scheduler.step()  # For StepLR and CosineAnnealingLR
         
         # Early stopping check
         if early_stopping and early_stopping(val_metrics['accuracy'], model):
             print(f'Early stopping triggered at epoch {epoch + 1}')
-            wandb.log({
-                "early_stopping_epoch": epoch + 1, 
-                "early_stopping_triggered": True
-            })
             break
-    
-    # Log final training info
-    wandb.log({
-        "total_epochs_trained": len(train_losses),
-        "early_stopping_enabled": config["early_stopping_enabled"],
-        **({"best_val_accuracy": early_stopping.best_score} if early_stopping else {})
-    })
     
     return train_losses, val_losses, val_accuracies
 
@@ -285,7 +318,7 @@ def evaluate_model(model, test_loader):
 # Train the model
 print("\nStarting training...")
 train_losses, val_losses, val_accuracies = train_model(
-    model, train_loader, val_loader, criterion, optimizer, num_epochs=config["epochs"]
+    model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs=config["epochs"]
 )
 
 # Evaluate the model
@@ -300,10 +333,8 @@ print(f"F1 Score (Weighted): {test_results['f1_weighted']:.4f}")
 # Calculate combined F1 for test results
 test_combined_f1 = (test_results['f1_macro'] + test_results['f1_weighted']) / 2
 
-# Log test metrics (simplified)
+# Only log confusion matrix (no additional metrics to charts)
 wandb.log({
-    "test_accuracy": test_results['accuracy'],
-    "test_f1_combined": test_combined_f1,
     "confusion_matrix": wandb.plot.confusion_matrix(
         probs=None,
         y_true=test_results['labels'],
@@ -322,13 +353,14 @@ torch.save(model.state_dict(), model_path)
 print(f"\nModel saved as '{model_path}'")
 wandb.save(model_path)
 
-# Log final metrics summary
+# Log final metrics summary (only in summary, not as charts)
 wandb.summary.update({
     "final_test_accuracy": test_results['accuracy'],
     "final_test_f1_combined": test_combined_f1,
     "total_parameters": sum(p.numel() for p in model.parameters()),
     "epochs_trained": len(train_losses),
     "early_stopping_enabled": config["early_stopping_enabled"],
+    "model_architecture": config["architecture"],
     **({"early_stopping_patience": config["early_stopping_patience"]} if config["early_stopping_enabled"] else {})
 })
 
