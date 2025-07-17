@@ -84,3 +84,5 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+./wandb/
+./.ipynb_checkpoints/
