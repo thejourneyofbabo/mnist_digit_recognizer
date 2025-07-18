@@ -30,7 +30,7 @@ config = {
 # Initialize W&B
 wandb.init(
     project="mnist-cnn", 
-    name="mnist-cnn-optimized",
+    name="mnist-cnn-optimized-teat2",
     group="1x1-fc", 
     tags=["mnist-cnn", "optimized"],
     config=config)
