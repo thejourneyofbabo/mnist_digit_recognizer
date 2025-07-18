@@ -9,7 +9,7 @@ import wandb
 
 # Configuration
 config = {
-    "learning_rate": 0.0015,
+    "learning_rate": 0.0011,
     "epochs": 40,
     "batch_size": 64,
     "val_split": 0.15,
@@ -22,7 +22,7 @@ config = {
 # Initialize W&B
 wandb.init(
     project="mnist-cnn",
-    name="mnist-light-v4(learning_rate_scheduler)",
+    name="mnist-light-v4.4(val-split=0.15)",
     config=config)
 
 # Device setup
