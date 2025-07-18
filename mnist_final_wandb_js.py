@@ -13,8 +13,12 @@ config = {
     "learning_rate": 0.001,
     "epochs": 40,
     "batch_size": 64,
-    "val_split": 0.15,
-    "early_stopping_patience": 7,
+    "val_split": 0.15, # Validation split ratio
+    # Early stopping parameters
+    "early_stopping_patience": 7, # Early stopping patience
+    # Learning rate scheduler parameters
+    "gamma": 0.1, # Learning rate decay factor
+    "step_size": 10, # Step size for learning rate scheduler
 }
 
 # Initialize W&B
@@ -81,7 +85,7 @@ class SimpleCNN(nn.Module):
 model = SimpleCNN().to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
-scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=config["step_size"], gamma=config["gamma"])
 
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
