@@ -4,8 +4,9 @@ import torch.optim as optim
 import torchvision.transforms as transforms
 from torchvision import datasets
 from torch.utils.data import DataLoader, random_split
-from sklearn.metrics import classification_report, f1_score
+from sklearn.metrics import classification_report, f1_score, precision_score, recall_score, confusion_matrix
 import wandb
+import numpy as np
 
 # Configuration
 config = {
@@ -80,6 +81,7 @@ class SimpleCNN(nn.Module):
 model = SimpleCNN().to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -110,7 +112,7 @@ class EarlyStopping:
         self.best_weights = model.state_dict().copy()
 
 # Training function
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=20):
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs=20):
     early_stopping = EarlyStopping(patience=config["early_stopping_patience"])
     
     for epoch in range(num_epochs):
@@ -136,16 +138,22 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         # Validation
         val_metrics = evaluate_model(model, val_loader)
         
+        # Learning rate scheduler step
+        scheduler.step()
+        
         # Log to W&B
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
             "val_loss": val_metrics['loss'],
-            "val_accuracy": val_metrics['accuracy']
+            "val_accuracy": val_metrics['accuracy'],
+            "val_f1_macro": val_metrics['f1_macro'],
+            "learning_rate": optimizer.param_groups[0]['lr']
         })
         
         print(f'Epoch {epoch + 1}/{num_epochs} - Train Loss: {avg_train_loss:.4f}, '
-              f'Val Loss: {val_metrics["loss"]:.4f}, Val Acc: {val_metrics["accuracy"]:.2f}%')
+              f'Val Loss: {val_metrics["loss"]:.4f}, Val Acc: {val_metrics["accuracy"]:.2f}%, '
+              f'Val F1: {val_metrics["f1_macro"]:.4f}, LR: {optimizer.param_groups[0]["lr"]:.6f}')
         
         # Early stopping
         if early_stopping(val_metrics['accuracy'], model):
@@ -172,28 +180,72 @@ def evaluate_model(model, data_loader):
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
     
+    # Convert to numpy arrays
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+    
+    # Calculate metrics
     accuracy = 100 * correct / total
-    f1_macro = f1_score(all_labels, all_preds, average='macro')
+    precision_macro = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+    recall_macro = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+    f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+    
+    # Per-class metrics
+    precision_per_class = precision_score(all_labels, all_preds, average=None, zero_division=0)
+    recall_per_class = recall_score(all_labels, all_preds, average=None, zero_division=0)
+    f1_per_class = f1_score(all_labels, all_preds, average=None, zero_division=0)
+    
+    # Confusion matrix
+    conf_matrix = confusion_matrix(all_labels, all_preds)
     
     return {
         'loss': total_loss / len(data_loader),
         'accuracy': accuracy,
+        'precision_macro': precision_macro,
+        'recall_macro': recall_macro,
         'f1_macro': f1_macro,
+        'precision_per_class': precision_per_class,
+        'recall_per_class': recall_per_class,
+        'f1_per_class': f1_per_class,
+        'confusion_matrix': conf_matrix,
         'predictions': all_preds,
         'labels': all_labels
     }
 
+# Metrics display
+def print_metrics(metrics):
+    print(f"\nEvaluation Results:")
+    print(f"Accuracy: {metrics['accuracy']:.2f}%")
+    print(f"Precision: {metrics['precision_macro']:.4f}")
+    print(f"Recall: {metrics['recall_macro']:.4f}")
+    print(f"F1 Score: {metrics['f1_macro']:.4f}")
+    
+    print(f"\nPer-class metrics:")
+    for i in range(len(metrics['precision_per_class'])):
+        print(f"Class {i}: P={metrics['precision_per_class'][i]:.3f}, "
+              f"R={metrics['recall_per_class'][i]:.3f}, "
+              f"F1={metrics['f1_per_class'][i]:.3f}")
+
+# W&B logging
+def log_test_metrics(metrics):
+    wandb.log({
+        "test_accuracy": metrics['accuracy'],
+        "test_precision": metrics['precision_macro'],
+        "test_recall": metrics['recall_macro'],
+        "test_f1": metrics['f1_macro']
+    })
+
 # Train the model
 print("Starting training...")
-train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=config["epochs"])
+train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs=config["epochs"])
 
 # Evaluate the model
 print("Evaluating model...")
 test_results = evaluate_model(model, test_loader)
 
-print(f"\nTest Results:")
-print(f"Accuracy: {test_results['accuracy']:.2f}%")
-print(f"F1 Score (Macro): {test_results['f1_macro']:.4f}")
+# Display and log results
+print_metrics(test_results)
+log_test_metrics(test_results)
 
 # Log confusion matrix
 wandb.log({
@@ -205,8 +257,10 @@ wandb.log({
     )
 })
 
+# Classification report
 print("\nClassification Report:")
-print(classification_report(test_results['labels'], test_results['predictions']))
+print(classification_report(test_results['labels'], test_results['predictions'], 
+                          target_names=[f"Digit {i}" for i in range(10)]))
 
 # Save model
 torch.save(model.state_dict(), 'mnist_cnn_model.pth')
