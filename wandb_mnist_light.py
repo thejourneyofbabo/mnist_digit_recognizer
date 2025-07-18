@@ -9,20 +9,17 @@ import wandb
 
 # Configuration
 config = {
-    "learning_rate": 0.0011,
+    "learning_rate": 0.001,
     "epochs": 40,
     "batch_size": 64,
     "val_split": 0.15,
-    "early_stopping_patience": 5,
-    "early_stopping_min_delta": 0.001,
-    "scheduler_enabled": True,
-    "scheduler_gamma": 0.99,
+    "early_stopping_patience": 7,
 }
 
 # Initialize W&B
 wandb.init(
     project="mnist-cnn",
-    name="mnist-light-v4.4(val-split=0.15)",
+    name="mnist-light-v0(basic-val_split)",
     config=config)
 
 # Device setup
@@ -84,21 +81,12 @@ model = SimpleCNN().to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
 
-# Learning rate scheduler
-scheduler = None
-if config["scheduler_enabled"]:
-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=config["scheduler_gamma"])
-    print(f"Using ExponentialLR scheduler (gamma={config['scheduler_gamma']})")
-else:
-    print("No learning rate scheduler")
-
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
 # Early Stopping
 class EarlyStopping:
-    def __init__(self, patience=5, min_delta=0.0):
+    def __init__(self, patience=5):
         self.patience = patience
-        self.min_delta = min_delta
         self.best_score = None
         self.counter = 0
         self.best_weights = None
@@ -107,7 +95,7 @@ class EarlyStopping:
         if self.best_score is None:
             self.best_score = val_score
             self.save_checkpoint(model)
-        elif val_score < self.best_score + self.min_delta:
+        elif val_score <= self.best_score:
             self.counter += 1
             if self.counter >= self.patience:
                 model.load_state_dict(self.best_weights)
@@ -122,11 +110,8 @@ class EarlyStopping:
         self.best_weights = model.state_dict().copy()
 
 # Training function
-def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler=None, num_epochs=20):
-    early_stopping = EarlyStopping(
-        patience=config["early_stopping_patience"],
-        min_delta=config["early_stopping_min_delta"]
-    )
+def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=20):
+    early_stopping = EarlyStopping(patience=config["early_stopping_patience"])
     
     for epoch in range(num_epochs):
         # Training
@@ -151,25 +136,16 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         # Validation
         val_metrics = evaluate_model(model, val_loader)
         
-        # Get current learning rate
-        current_lr = optimizer.param_groups[0]['lr']
-        
         # Log to W&B
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
             "val_loss": val_metrics['loss'],
-            "val_accuracy": val_metrics['accuracy'],
-            "learning_rate": current_lr
+            "val_accuracy": val_metrics['accuracy']
         })
         
         print(f'Epoch {epoch + 1}/{num_epochs} - Train Loss: {avg_train_loss:.4f}, '
-              f'Val Loss: {val_metrics["loss"]:.4f}, Val Acc: {val_metrics["accuracy"]:.2f}%, '
-              f'LR: {current_lr:.6f}')
-        
-        # Update learning rate scheduler
-        if scheduler is not None:
-            scheduler.step()
+              f'Val Loss: {val_metrics["loss"]:.4f}, Val Acc: {val_metrics["accuracy"]:.2f}%')
         
         # Early stopping
         if early_stopping(val_metrics['accuracy'], model):
@@ -209,7 +185,7 @@ def evaluate_model(model, data_loader):
 
 # Train the model
 print("Starting training...")
-train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs=config["epochs"])
+train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=config["epochs"])
 
 # Evaluate the model
 print("Evaluating model...")
