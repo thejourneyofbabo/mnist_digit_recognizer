@@ -18,13 +18,13 @@ config = {
     "early_stopping_patience": 7, # Early stopping patience
     # Learning rate scheduler parameters
     "gamma": 0.1, # Learning rate decay factor
-    "step_size": 10, # Step size for learning rate scheduler
+    "step_size": 5, # Step size for learning rate scheduler
 }
 
 # Initialize W&B
 wandb.init(
     project="mnist-final-wandb-js",
-    name="mnist-final-v0(base-setup)",
+    name="mnist-final-v0.1(reduced-step-size: 10 to 5)",
     config=config)
 
 # Device setup
