@@ -19,8 +19,8 @@ config = {
 
 # Initialize W&B
 wandb.init(
-    project="mnist-cnn",
-    name="mnist-light-v0(basic-val_split)",
+    project="mnist-final-wandb-js",
+    name="mnist-final-v0(base-setup)",
     config=config)
 
 # Device setup
@@ -226,14 +226,11 @@ def print_metrics(metrics):
               f"R={metrics['recall_per_class'][i]:.3f}, "
               f"F1={metrics['f1_per_class'][i]:.3f}")
 
-# W&B logging
+# W&B logging (removed individual test metrics - only confusion matrix will be logged)
 def log_test_metrics(metrics):
-    wandb.log({
-        "test_accuracy": metrics['accuracy'],
-        "test_precision": metrics['precision_macro'],
-        "test_recall": metrics['recall_macro'],
-        "test_f1": metrics['f1_macro']
-    })
+    # Test metrics are only printed, not logged to W&B
+    # Only confusion matrix will be logged as it provides meaningful visualization
+    pass
 
 # Train the model
 print("Starting training...")
